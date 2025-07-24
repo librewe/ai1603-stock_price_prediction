@@ -10,7 +10,7 @@ TRAIN_EPOCHS = 100
 
 class LSTM_Regression(nn.Module):
     def __init__(self, input_size, output_size, 
-                 hidden_size=128, num_layers=3, dropout=0.1):
+                 hidden_size=32, num_layers=2, dropout=0.1):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
                             batch_first=False, dropout=dropout, bidirectional=False)
@@ -60,8 +60,9 @@ def split_data_resize(data, train_size=TRAIN_SIZE, drop_last=True, device=None):
         return (np.array(dataset_x), np.array(dataset_y))
     data = data[:int(len(data)*train_size)]
     train_x, train_y = create_dataset(data)
-    if drop_last:
-        train_x, train_y = train_x[:-1], train_y[:-1] #最后一个data是None
+    # if drop_last:
+    #     train_x, train_y = train_x[:-1], train_y[:-1] #最后一个data是None
+    ## 然而并不是
     train_x = train_x.reshape(-1, 1, DAYS_FOR_TRAIN)
     train_y = train_y.reshape(-1, 1, 1)
     train_x = torch.from_numpy(train_x).to(device)
@@ -74,13 +75,14 @@ class Train_Single_Stock:
                  model=LSTM_Regression(DAYS_FOR_TRAIN, 1)):
         self.symbol = symbol
         self.epochs = epochs
-        self.prepare_data()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.prepare_data()
         self.model = model.to(self.device)
         self.loss_function = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(),
-                                          lr=1e-3, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+                                          lr=2e-3, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
         self.train_loss = []
+        self.test_loss = []
 
     def prepare_data(self):
         self.data = Train_Single_Stock.train_data[Train_Single_Stock.train_data['symbol']==self.symbol]#[:1000]
@@ -90,11 +92,15 @@ class Train_Single_Stock:
         self.train_size = int(len(self.data_close) * TRAIN_SIZE)
         self.test_size = len(self.data_close) - self.train_size
         self.train_xy = split_data_resize(self.data_close)
+        self.test_xy = split_data_resize(self.data_close[self.train_size:], train_size=1.0, drop_last=False, device=self.device)
 
     def set_train_data(self,data=None):
         self.train_x, self.train_y = self.train_xy
+        self.test_x, self.test_y = self.test_xy
         self.train_x = self.train_x.to(self.device)
         self.train_y = self.train_y.to(self.device)
+        self.test_x = self.test_x.to(self.device)
+        self.test_y = self.test_y.to(self.device)
         if data is None:
             return
         else:
@@ -111,13 +117,17 @@ class Train_Single_Stock:
         optimizer = self.optimizer
         for i in range(self.epochs):
             out, _ = self.model(self.train_x, hidden)
-            out += (torch.randn_like(out)-0.5) * 0.01
+            # out += (torch.randn_like(out)-0.5) * 0.001 #@1
             loss = loss_function(out, self.train_y)
+            if __name__ == '__main__':
+                loss1 = loss_function(torch.tensor(self.eval()[0],device=self.device ), self.test_y)
+                self.test_loss.append(loss1.item())
+                self.model.train()
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            # self.set_train_data(out)
-            # for j in range(len(self.train_x)):# 计划采样-随机替换一部分输入数据
+            self.set_train_data(out)
+            # for j in range(len(self.train_x)):# 计划采样-随机替换一部分输入数据 #@2
             #     if np.random.rand() < 1/(1+np.exp(-((1-i/self.epochs)*10-5))):
             #         self.train_x[j] = self.train_x_pred[j]
             self.train_loss.append(loss.item())
@@ -148,9 +158,9 @@ class Train_Single_Stock:
                     part1 = torch.empty((1, 0), dtype=dataset_x.dtype).to(self.device)
                 new_input = torch.cat([part1, y_tensor], dim=1).to(self.device)
                 new_input = new_input.reshape(1, 1, DAYS_FOR_TRAIN)
-                new_input = new_input.mean()+ 1.02* (new_input - new_input.mean())  # @
+                # new_input = new_input.mean()+ 1.02* (new_input - new_input.mean())  #@3
                 next_pred, hidden = model(new_input, hidden)
-                # if len(y_) % 30 == np.random.randint(0, 30):
+                # if len(y_) % 30 == 29:#np.random.randint(0, 30): #@4
                 #     hidden = hidden_old  # 随机地复位隐藏层
                 next_pred = next_pred.cpu()
                 y_.append(next_pred)
@@ -162,7 +172,11 @@ if __name__ == '__main__':
     ins.train()
     pred_train, hidden = ins.eval()
     pred_test, _ = ins.eval(ins.test_size, hidden)
-    plt.figure()
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(ins.train_loss, label='train_loss')
+    plt.plot(ins.test_loss, label='test_loss')
+    plt.subplot(1, 2, 2)
     plt.plot(ins.data[['close']].reset_index(drop=True), 'b', label='real')
     plt.plot(pred_train * (ins.max_value - ins.min_value) + ins.min_value, 'r', label='real')
     x = len(pred_train)
